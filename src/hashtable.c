@@ -2,14 +2,21 @@
 #include <string.h>
 #include <math.h>
 #include "hashtable.h"
+#include "prime.h"
 
-#define HT_PRIME_1 2
-#define HT_PRIME_2 3
-#define HT_INIT_BASE_SIZE 53
+/**
+ * Hashtable Parameters
+ */
+static int HT_PRIME_1 = 151;                   // Parameter to hashing algorithm
+static int HT_PRIME_2 = 163;                   // Parameter to hashing algorithm
+static int HT_INIT_BASE_SIZE = 53;             // Minimum size of hashtable
+static ht_item HT_REMOVED_ITEM = {NULL, NULL}; // Used to mark a bucket containing a removed item
 
-static ht_item HT_REMOVED_ITEM = {NULL, NULL};
+/* Internal Functions */
 
-// Private (static) function is only called internally
+/**
+ * ht_new_item - Create a new key-value pair
+ */
 static ht_item *ht_new_item(const char *key, const char *value)
 {
     ht_item *item = malloc(sizeof(ht_item));
@@ -18,83 +25,86 @@ static ht_item *ht_new_item(const char *key, const char *value)
     return item;
 }
 
-ht_hashtable *ht_new_table()
-{
-    return ht_new_table_with_size(HT_INIT_BASE_SIZE);
-}
+/**
+ * ht_new_table_with_size - Creates a new table using parameterized base_size
+ */
 ht_hashtable *ht_new_table_with_size(const int base_size)
 {
     ht_hashtable *table = malloc(sizeof(ht_hashtable));
     table->base_size = base_size;
-    table->size = next_prime(table->base_size);
-    table->count = 0; // Table is initially empty
+    table->size = next_prime(table->base_size); // Size is always a prime number (for easier resizing)
+    table->count = 0;                           // Table initially empty
     table->items = calloc((size_t)table->size, sizeof(ht_item *));
     return table;
 }
 
-void ht_resize(ht_hashtable *table, const int base_size)
+/**
+ * ht_new_table - Create new table with default table size
+ */
+ht_hashtable *ht_new_table()
 {
-    if (base_size < HT_INIT_BASE_SIZE) // check to makesure we don't dpwnsie below min
-        return;
-    ht_hashtable *new_table = ht_new_table_with_size(base_size);
-    for (int i = 0; i < table->size; i++)
-    {
-        ht_item *item = table->items[i];
-        if (item != NULL && item != &HT_REMOVED_ITEM)
-            ht_insert(new_table, item->key, item->value);
-    }
-
-    table->base_size = new_table->base_size;
-    table->count = new_table->count;
-
-    // To delete new_ht, we give it ht's size and items
-    const int tmp_size = table->size;
-    table->size = new_table->size;
-    new_table->size = tmp_size;
-
-    ht_item **tmp_items = table->items;
-    table->items = new_table->items;
-    new_table->items = tmp_items;
-
-    ht_del_hash_table(new_table);
+    return ht_new_table_with_size(HT_INIT_BASE_SIZE);
 }
 
-static void ht_remove_item(ht_item *item)
+/**
+ * ht_delete_item - Deletes key-value pair
+ */
+static void ht_delete_item(ht_item *item)
 {
     free(item->key);
     free(item->value);
     free(item);
 }
 
-static void ht_resize_up(ht_hashtable *table)
-{
-    const int new_size = table->base_size * 2;
-    ht_resize(table, new_size);
-}
-
-static void ht_resize_down(ht_hashtable *table)
-{
-    const int new_size = table->base_size / 2;
-    ht_resize(table, new_size);
-}
-
-void ht_remove_table(ht_hashtable *table)
+/**
+ * ht_delete_table - Deletes the entire hashtable
+ */
+void ht_delete_table(ht_hashtable *table)
 {
     for (int i = 0; i < table->size; i++)
     {
         ht_item *item = table->items[i];
-        if (item)
-            ht_remove_item(item);
+        if (item && item != &HT_REMOVED_ITEM)
+            ht_delete_item(item);
     }
     free(table->items);
     free(table);
 }
 
-/* A hash function must take in a string input and
- * return a number in [0, m] where m is the desired table size
+/**
+ * ht_resize - Resizes (up/down) the table by creating new table and copying data
  */
+void ht_resize(ht_hashtable *table, const int base_size)
+{
+    if (base_size < HT_INIT_BASE_SIZE) // To ensure we do not resize down below the minimum
+        return;
+    ht_hashtable *temp_table = ht_new_table_with_size(base_size);
+    for (int i = 0; i < table->size; i++)
+    {
+        ht_item *item = table->items[i];
+        if (item && item != &HT_REMOVED_ITEM)
+            ht_insert(temp_table, item->key, item->value);
+    }
 
-// Prime must be a prime number that is larger than the size of the alphabet (> 128 for ASCII)
+    table->base_size = temp_table->base_size; // Swap values
+    table->count = temp_table->count;         // temp_table's values set by ht_new_table_with_size
+
+    // Put old values in temp_table and call ht_delete_table
+    const int old_size = table->size;
+    table->size = temp_table->size;
+    temp_table->size = old_size;
+
+    ht_item **old_items = table->items;
+    table->items = temp_table->items;
+    temp_table->items = old_items;
+
+    ht_delete_table(temp_table); // Remove temp_table which holds old values
+}
+
+/**
+ * ht_hash - Produces a integer in [0, m] using parameterized key input where m is the table size.
+ * @param prime is a prime number that is larger than the size of the character set (128 for ASCII)
+ */
 int ht_hash(const char *key, const int prime, const int m)
 {
     long hash = 0;
@@ -107,36 +117,39 @@ int ht_hash(const char *key, const int prime, const int m)
     return (int)hash;
 }
 
-/* Collision handling using open addressing & double hash */
-// i for hash attempt
-static int ht_get_hash(const char *key, const int m, const int i)
+/**
+ * ht_get_hash - Wrapper for double-hashing scheme
+ * @paragraph iter is the number of hash attempts
+ */
+static int ht_get_hash(const char *key, const int m, const int iter)
 {
-    return (hash(key, HT_PRIME_1, m) + i * (hash(key, HT_PRIME_2, m) + 1)) % m;
+    return (ht_hash(key, HT_PRIME_1, m) + iter * (ht_hash(key, HT_PRIME_2, m) + 1)) % m;
 }
 
-// Hashtable API
+/* Hashtable API */
 
-// hash_table.h
-void insert(ht_hashtable *table, const char *key, const char *value)
+/**
+ * insert - Insert a Key-Value pair into the hashtable
+ */
+void ht_insert(ht_hashtable *table, const char *key, const char *value)
 {
-    const int load = table->count * 100 / table->size;
-    if (load > 70)
-    {
-        ht_resize_up(table);
+    if ((table->count * 100 / table->size) > 70)
+    {                                           // If load is greater than 70%
+        ht_resize(table, table->base_size * 2); // Resize (up) the hashtable for improved performance
     }
-    ht_item *item = new_item(key, value);
-    int index = get_hash(item->key, table->size, 0);
+    ht_item *item = ht_new_item(key, value);
+    int index = ht_get_hash(item->key, table->size, 0);
     ht_item *current_item = table->items[index];
     int iter = 1;
     while (current_item && current_item != &HT_REMOVED_ITEM)
     {
-        if (strcmp(current_item->key, key) == 0)
-        {
-            ht_remove_item(current_item);
+        if (strcmp(current_item->key, key) == 0) // If an item with same key already exists
+        {                                        // Update the value of the item
+            ht_delete_item(current_item);
             table->items[index] = item;
             return;
-        }
-        index = get_hash(item->key, table->size, iter);
+        }                                                  // If a collision occurred (with a different key)
+        index = ht_get_hash(item->key, table->size, iter); // Handle using double-hashing
         current_item = table->items[index];
         iter++;
     }
@@ -144,23 +157,23 @@ void insert(ht_hashtable *table, const char *key, const char *value)
     table->count++;
 }
 
-char *search(ht_hashtable *table, const char *key)
+/**
+ * search - Search for a matching item in the table using the key
+ */
+char *ht_search(ht_hashtable *table, const char *key)
 {
-    int index = get_hash(key, table->size, 0);
+    int index = ht_get_hash(key, table->size, 0);
     ht_item *item = table->items[index];
     int iter = 1;
-    while (item)
+    while (item && item != &HT_REMOVED_ITEM)
     {
-        if (item != &HT_REMOVED_ITEM)
+        if (strcmp(item->key, key) == 0) // If key matches
+            return item->value;          // Return value
+        else
         {
-            if (strcmp(item->key, key) == 0)
-                return item->value;
-            else
-            {
-                index = get_hash(key, table->size, iter);
-                item = table->items[index];
-                iter++;
-            }
+            index = ht_get_hash(key, table->size, iter); // Attempt to find using double-hash
+            item = table->items[index];
+            iter++;
         }
     }
     return NULL;
@@ -168,14 +181,19 @@ char *search(ht_hashtable *table, const char *key)
 
 // Deleting causes issue in open addressing, breaks collision chain,
 // instead mark as removed (using sntinel value)
-void remove(ht_hashtable *table, const char *key)
+
+/**
+ * remove - Remove item from table
+ * @details Actually deleting the item from the table can cause issue (in open addressing) as it breaks the collision chain.
+ * Instead, we will simply mark the slot as removed using a sentinel value
+ */
+void ht_remove(ht_hashtable *table, const char *key)
 {
-    const int load = table->count * 100 / table->size;
-    if (load < 10)
-    {
-        ht_resize_down(table);
+    if ((table->count * 100 / table->size) < 10)
+    {                                           // If the load is under 10%
+        ht_resize(table, table->base_size / 2); // Resize (down) to save memory usage
     }
-    int index = get_hash(key, table->size, 0);
+    int index = ht_get_hash(key, table->size, 0);
     ht_item *item = table->items[index];
     int iter = 1;
     while (item)
@@ -184,10 +202,10 @@ void remove(ht_hashtable *table, const char *key)
         {
             if (strcmp(item->key, key) == 0)
             {
-                remove_item(item);
+                ht_delete_item(item);
                 table->items[index] = &HT_REMOVED_ITEM;
             }
-            index = get_hash(key, table->size, iter);
+            index = ht_get_hash(key, table->size, iter);
             item = table->items[index];
             iter++;
         }
